@@ -16,18 +16,19 @@
 		include "sonic3k.macros.asm"		; include some simplifying macros and functions
 		include "sonic3k.constants.asm"		; include some constants
 		include "s3.constants.asm"		; RAM addresses moved around between S3 and S&K
+		include "ErrorHandler/Debugger.asm"	; include debugger macros and functions
 ; ---------------------------------------------------------------------------
-; Include SMPS2ASM, for expressing SMPS bytecode in a portable and human-readable form.
-FixMusicAndSFXDataBugs = 0
-SonicDriverVer = 3 ; Tell SMPS2ASM that we are targeting Sonic 3's sound driver
-		include "Sound/_smps2asm_inc.asm"
+; Include sound driver macros and functions
+OptimiseStopZ80	= 2	; if 1, remove stopZ80 and startZ80, if 2, use only for controllers and Hint (no effect on sound driver)
+		include "Sound/Definitions.asm"
+; ---------------------------------------------------------------------------
 
-FixBugs = 0
+FixBugs = 1
 ; If 1, fixes multiple bugs within the game
 
-Size_of_Snd_driver_guess = $1300
-Size_of_Snd_driver2_guess = $843
-Size_of_Snd_Bank1 = $E60
+;Size_of_Snd_driver_guess = $1300
+;Size_of_Snd_driver2_guess = $843
+;Size_of_Snd_Bank1 = $E60
 ; This particular bank has its contents aligned to the end
 ; ---------------------------------------------------------------------------
 
@@ -36,13 +37,13 @@ StartOfROM:
 		fatal "StartOfROM was $\{*} but it should be 0"
 	endif
 
-Vectors:	dc.l	0,	EntryPoint,	ErrorTrap,	ErrorTrap		; 0
-		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 4
-		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 8
-		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 12
-		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 16
-		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 20
-		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 24
+Vectors:	dc.l	$00000000,	EntryPoint,	BusError,	AddressError	; 0
+		dc.l	IllegalInstr,	ZeroDivide,	ChkInstr,	TrapvInstr	; 4
+		dc.l	PrivilegeViol,	Trace,	Line1010Emu,	Line1111Emu	; 8
+		dc.l	ErrorExcept,	ErrorExcept,	ErrorExcept,	ErrorExcept	; 12
+		dc.l	ErrorExcept,	ErrorExcept,	ErrorExcept,	ErrorExcept	; 16
+		dc.l	ErrorExcept,	ErrorExcept,	ErrorExcept,	ErrorExcept	; 20
+		dc.l	ErrorExcept,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 24
 		dc.l	JmpTo_HInt,	ErrorTrap,	VInt,		ErrorTrap	; 28
 		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 32
 		dc.l	ErrorTrap,	ErrorTrap,	ErrorTrap,	ErrorTrap	; 36
@@ -77,13 +78,6 @@ Unknown_Header:	dc.w 1
 		dc.l SRAM_end
 		dc.b "                "
 Country_Code:	dc.b "U               "
-; ---------------------------------------------------------------------------
-; Crash/Freeze the 68000. Like Sonic 2 the Z80 will still keep running, so music playback will continue.
-
-ErrorTrap:
-		nop
-		nop
-		bra.s	ErrorTrap
 ; ---------------------------------------------------------------------------
 
 EntryPoint:
@@ -596,7 +590,7 @@ loc_716:
 		move.l	d7,(a6)+
 		dbf	d6,loc_716
 		bsr.w	Init_VDP
-		bsr.w	SndDrvInit
+		jsr	(SndDrvInit).l
 		bsr.w	Init_Controllers
 		jsr	(SRAM_Load).l
 		move.b	#GameMode_SegaScreen,(Game_mode).w
@@ -771,9 +765,6 @@ VInt_0_Main:
 		beq.s	VInt_0_Level
 		cmpi.b	#GameMode_Level,(Game_mode).w
 		beq.s	VInt_0_Level
-		stopZ80
-		bsr.w	sndDriverInput
-		startZ80
 		bra.s	VInt_Done	; otherwise, return from V-int
 ; ---------------------------------------------------------------------------
 
@@ -800,7 +791,6 @@ VInt_0_FullyUnderwater:
 
 VInt_0_Water_Cont:
 		move.w	(H_int_counter_command).w,(a5)
-		bsr.w	sndDriverInput
 		startZ80
 		bra.w	VInt_Done
 ; ---------------------------------------------------------------------------
@@ -841,7 +831,6 @@ VInt_0_NoWater:
 		dma68kToVDP Sprite_table_alternate,$F800,Sprite_table_alternate_end-Sprite_table_alternate,VRAM
 
 VInt_0_Done:
-		bsr.w	sndDriverInput
 		startZ80
 		bra.w	VInt_Done
 ; ---------------------------------------------------------------------------
@@ -864,7 +853,9 @@ VInt_14:
 		bne.s	loc_A76	; run the following code once every 16 frames
 
 		stopZ80
+		stopZ802
 		bsr.w	Poll_Controllers
+		startZ802
 		startZ80
 
 loc_A76:
@@ -900,7 +891,9 @@ VInt_10:
 
 VInt_8:
 		stopZ80
+		stopZ802
 		bsr.w	Poll_Controllers
+		startZ802
 
 		tst.b	(Water_full_screen_flag).w
 		bne.s	+
@@ -942,7 +935,6 @@ VInt_8:
 		move.l	(V_scroll_value_P2).w,(V_scroll_value_P2_copy).w
 		jsr	(SpecialVInt_Function).l
 		jsr	(VInt_DrawLevel).l
-		bsr.w	sndDriverInput
 		startZ80
 		move	#$2300,sr
 		tst.b	(Water_flag).w
@@ -975,7 +967,10 @@ locret_C0C:
 
 VInt_A_C:
 		stopZ80
+		stopZ802
 		bsr.w	Poll_Controllers
+		startZ802
+
 		tst.b	(Water_full_screen_flag).w
 		bne.s	+
 		dma68kToVDP Normal_palette,0,Normal_palette_end-Normal_palette,CRAM
@@ -1013,7 +1008,6 @@ VInt_A_C:
 +
 		bsr.w	Process_DMA_Queue
 		move.l	(V_scroll_value_P2).w,(V_scroll_value_P2_copy).w
-		jsr	(sndDriverInput).l
 		startZ80
 		bsr.w	Process_Nem_Queue
 		jmp	(Set_Kos_Bookmark).l
@@ -1033,7 +1027,9 @@ VInt_12:
 
 VInt_18:
 		stopZ80
+		stopZ802
 		bsr.w	Poll_Controllers
+		startZ802
 
 		dma68kToVDP Normal_palette,0,Normal_palette_end-Normal_palette,CRAM
 		dma68kToVDP Sprite_table,$F800,Sprite_table_end-Sprite_table,VRAM
@@ -1045,21 +1041,21 @@ VInt_18:
 
 loc_DEA:
 		bsr.w	Process_DMA_Queue
-		bsr.w	sndDriverInput
 		startZ80
 		rts
 ; ---------------------------------------------------------------------------
 
 VInt_16:
 		stopZ80
+		stopZ802
 		bsr.w	Poll_Controllers
+		startZ802
 
 		dma68kToVDP Normal_palette,0,Normal_palette_end-Normal_palette,CRAM
 		dma68kToVDP Sprite_table,$F800,Sprite_table_end-Sprite_table,VRAM
 		dma68kToVDP H_scroll_buffer,$F000,H_scroll_buffer_end-H_scroll_buffer,VRAM
 
 		bsr.w	Process_DMA_Queue
-		bsr.w	sndDriverInput
 		startZ80
 		bsr.w	Process_Nem_Queue
 		tst.w	(Demo_timer).w
@@ -1100,7 +1096,10 @@ VInt_1E:
 
 Do_ControllerPal:
 		stopZ80
+		stopZ802
 		bsr.w	Poll_Controllers
+		startZ802
+
 		tst.b	(Water_full_screen_flag).w
 		bne.s	loc_F20
 		dma68kToVDP Normal_palette,0,Normal_palette_end-Normal_palette,CRAM
@@ -1113,7 +1112,6 @@ loc_F44:
 		dma68kToVDP Sprite_table,$F800,Sprite_table_end-Sprite_table,VRAM
 		dma68kToVDP H_scroll_buffer,$F000,H_scroll_buffer_end-H_scroll_buffer,VRAM
 		bsr.w	Process_DMA_Queue
-		bsr.w	sndDriverInput
 		startZ80
 		rts
 ; End of function Do_ControllerPal
@@ -1190,6 +1188,7 @@ HInt3:
 		lea	(VDP_data_port).l,a1
 		move.w	#$8AFF,VDP_control_port-VDP_data_port(a1)		; Reset HInt timing
 		stopZ80
+		stopZ802
 		movea.l	(Water_palette_data_addr).w,a2
 		moveq	#$C,d0
 		dbf	d0,*	; waste a few cycles here
@@ -1216,6 +1215,7 @@ HInt3:
 		dbf	d1,.transferColors	; repeat for number of colors
 
 .skipTransfer:
+		startZ802
 		startZ80
 		movem.l	(sp)+,d0-d1/a0-a2
 		tst.b	(Do_Updates_in_H_int).w
@@ -1246,6 +1246,7 @@ HInt5:
 		lea	(VDP_data_port).l,a1
 		move.w	#$8AFF,VDP_control_port-VDP_data_port(a1)
 		stopZ80
+		stopZ802
 		movea.l	(Water_palette_data_addr).w,a2
 		moveq	#$C,d0
 		dbf	d0,*
@@ -1273,6 +1274,7 @@ HInt5:
 		dbf	d1,.transferColors
 
 .skipTransfer:
+		startZ802
 		startZ80
 		movem.l	(sp)+,d0-d1/a0-a2
 		tst.b	(Do_Updates_in_H_int).w
@@ -1302,6 +1304,7 @@ HInt4:
 		lea	(VDP_data_port).l,a1
 		move.w	#$8AFF,VDP_control_port-VDP_data_port(a1)
 		stopZ80
+		stopZ802
 		movea.l	(Water_palette_data_addr).w,a2
 		moveq	#$1B,d0
 		dbf	d0,*
@@ -1328,6 +1331,7 @@ HInt4:
 		dbf	d1,.transferColors
 
 .skipTransfer:
+		startZ802
 		startZ80
 		movem.l	(sp)+,d0-d1/a0-a2
 		tst.b	(Do_Updates_in_H_int).w
@@ -1357,6 +1361,7 @@ HInt6:
 		lea	(VDP_data_port).l,a1
 		move.w	#$8AFF,VDP_control_port-VDP_data_port(a1)
 		stopZ80
+		stopZ802
 		movea.l	(Water_palette_data_addr).w,a2
 		moveq	#$1B,d0
 		dbf	d0,*
@@ -1383,6 +1388,7 @@ HInt6:
 		dbf	d1,.transferColors
 
 .skipTransfer:
+		startZ802
 		startZ80
 		movem.l	(sp)+,d0-d1/a0-a2
 		tst.b	(Do_Updates_in_H_int).w
@@ -1432,24 +1438,18 @@ HInt2_Do_Updates:
 		movem.l	(sp)+,d0-a6
 		rte
 
-; =============== S U B R O U T I N E =======================================
-
-
-sndDriverInput:
-		; Dummy leftover from Sonic 2.
-		rts
-; End of function sndDriverInput
-
 
 ; =============== S U B R O U T I N E =======================================
 
 
 Init_Controllers:
 		stopZ80
+		stopZ802
 		moveq	#$40,d0
 		move.b	d0,(HW_Port_1_Control).l
 		move.b	d0,(HW_Port_2_Control).l
 		move.b	d0,(HW_Expansion_Control).l
+		startZ802
 		startZ80
 		rts
 ; End of function Init_Controllers
@@ -1582,129 +1582,11 @@ Clear_DisplayData_Cont:
 		rts
 ; End of function Clear_DisplayData
 
-
-; =============== S U B R O U T I N E =======================================
-
-
-SndDrvInit:
-		nop
-		move.w	#$100,(Z80_bus_request).l
-		move.w	#$100,(Z80_reset).l	; release Z80 reset
-
-		; Load SMPS sound driver
-		lea	(Z80_SoundDriver).l,a0
-		lea	(Z80_RAM).l,a1
-		move.w	#(Size_of_Snd_driver_guess+Size_of_Snd_driver2_guess+$BC)-1,d0	; Oddly, this loads $BC extra bytes of padding into the Z80 instead of loading the exact size of the Z80. Remove the +$BC to fix this.
-
-loc_1584:
-		move.b	(a0)+,(a1)+
-		dbf	d0,loc_1584
-		; Load default variables
-		lea	(Z80_DefaultVariables).l,a0
-		lea	(Z80_RAM+zDataStart).l,a1
-		move.w	#Z80_DefaultVariables_end-Z80_DefaultVariables-1,d0
-
-loc_159A:
-		move.b	(a0)+,(a1)+
-		dbf	d0,loc_159A
-		; Detect PAL region consoles
-		btst	#6,(Graphics_flags).w
-		beq.s	loc_15B0
-		move.b	#1,(Z80_RAM+zPalFlag).l
-
-loc_15B0:
-		move.w	#0,(Z80_reset).l	; reset Z80
-		nop
-		nop
-		nop
-		nop
-		move.w	#$100,(Z80_reset).l	; release reset
-		startZ80
-		rts
-; End of function SndDrvInit
-
 ; ---------------------------------------------------------------------------
-; Default Z80 variables. These are actually set to more meaningful values
-; in other SMPS Z80 drivers.
-; ---------------------------------------------------------------------------
-Z80_DefaultVariables:
-		dc.b 0	; Unused 1
-		dc.b 0	; Unused 2
-		dc.b 0	; zPalFlag
-		dc.b 0	; Unused 3
-		dc.b 0	; zPalDblUpdCounter
-		dc.b 0	; zSoundQueue0
-		dc.b 0	; zSoundQueue1
-		dc.b 0	; zSoundQueue2
-		dc.b 0	; zTempoSpeedup
-		dc.b 0	; zNextSound
-		dc.b 0	; zMusicNumber
-		dc.b 0	; zSFXNumber0
-		dc.b 0	; zSFXNumber1
-		dc.b 0	; zFadeOutTimeout
-		dc.b 0	; zFadeDelay
-		dc.b 0	; zFadeDelayTimeout
-Z80_DefaultVariables_end:
-
-; ---------------------------------------------------------------------------
-; Always replaces an index previous passed to this function
+; Flamedriver - Functions Subroutine
 ; ---------------------------------------------------------------------------
 
-; =============== S U B R O U T I N E =======================================
-
-
-Play_Music:
-		stopZ80
-		move.b	d0,(Z80_RAM+zMusicNumber).l
-		startZ80
-		rts
-; End of function Play_Music
-
-; ---------------------------------------------------------------------------
-; plays a sound if the source object is on-screen
-; unused/dead code, left over from Sonic 2
-
-Play_SFX_Local:
-		tst.b	render_flags(a0)
-		bpl.s	Play_SFX_Done
-
-; ---------------------------------------------------------------------------
-; Can handle up to two different indexes in one frame
-; ---------------------------------------------------------------------------
-
-; =============== S U B R O U T I N E =======================================
-
-
-Play_SFX:
-		stopZ80
-		cmp.b	(Z80_RAM+zSFXNumber0).l,d0
-		beq.s	loc_1642
-		tst.b	(Z80_RAM+zSFXNumber0).l
-		bne.s	loc_163C
-		move.b	d0,(Z80_RAM+zSFXNumber0).l
-		startZ80
-		rts
-
-loc_163C:
-		move.b	d0,(Z80_RAM+zSFXNumber1).l
-
-loc_1642:
-		startZ80
-
-Play_SFX_Done:
-		rts
-; End of function Play_SFX
-
-
-; =============== S U B R O U T I N E =======================================
-
-
-Change_Music_Tempo:
-		stopZ80
-		move.b	d0,(Z80_RAM+zTempoSpeedup).l
-		startZ80
-		rts
-; End of function Change_Music_Tempo
+		include "Sound/Helper.asm"
 
 
 ; =============== S U B R O U T I N E =======================================
@@ -1723,9 +1605,7 @@ Pause_Game:
 
 loc_168E:
 		move.w	#1,(Game_paused).w
-		stopZ80
-		move.b	#1,(Z80_RAM+zPauseFlag).l	; Pause the music
-		startZ80
+		SMPS_PauseMusic	; Pause the music
 
 Pause_Loop:
 		move.b	#VInt_ID_10,(V_int_routine).w
@@ -1765,9 +1645,7 @@ Pause_ChkStart:
 		beq.s	Pause_Loop
 
 Pause_ResumeMusic:
-		stopZ80
-		move.b	#$80,(Z80_RAM+zPauseFlag).l	; Unpause music
-		startZ80
+		SMPS_UnpauseMusic	; Unpause music
 
 Pause_Unpause:
 		move.w	#0,(Game_paused).w
@@ -1778,9 +1656,7 @@ Pause_NoPause:
 
 Pause_FrameAdvance:
 		move.w	#1,(Game_paused).w
-		stopZ80
-		move.b	#$80,(Z80_RAM+zPauseFlag).l	; Unpause music
-		startZ80
+		SMPS_UnpauseMusic	; Unpause music
 		rts	; advance by a single frame
 ; End of function Pause_Game
 
@@ -4870,7 +4746,7 @@ loc_36AE:
 		ori.b	#$40,d0
 		move.w	d0,(VDP_control_port).l			; Turn the display on
 		bsr.w	Pal_FadeFromBlack		; Fade in to logo
-		moveq	#signextendB(cmd_SEGA),d0
+		moveq	#signextendB(cmd_SegaSound),d0
 		bsr.w	Play_Music
 		move.w	#3*60,(Demo_timer).w		; Set to wait for 3 seconds
 
@@ -4885,7 +4761,7 @@ Wait_Sega:
 		bne.s	Wait_Sega
 
 loc_36F8:
-		moveq	#signextendB(cmd_StopSEGA),d0
+		moveq	#signextendB(cmd_StopSega),d0
 		bsr.w	Play_Music				; Stop SEGA sound
 		lea	(Pal_Title).l,a1
 
@@ -5035,7 +4911,7 @@ loc_38D8:
 		move.l	#5000,(Next_extra_life_score).w
 		move.l	#5000,(Next_extra_life_score_P2).w
 		moveq	#signextendB(cmd_FadeOut),d0
-		bsr.w	Play_SFX			; Fade out the title screen music
+		bsr.w	Play_Music			; Fade out the title screen music
 		moveq	#0,d0
 		move.b	(Title_screen_option).w,d0		; Selection is stored here
 		bne.w	loc_3964
@@ -5057,7 +4933,7 @@ loc_3970:
 
 loc_3978:
 		moveq	#signextendB(cmd_FadeOut),d0
-		bsr.w	Play_SFX			; Fade out music
+		bsr.w	Play_Music			; Fade out music
 		move.w	(Next_demo_number).w,d0		; Get index of current demo to run
 		andi.w	#7,d0
 		add.w	d0,d0
@@ -5711,7 +5587,7 @@ Level:
 		tst.w	(Demo_mode_flag).w		; Are we on an ending demo? (Sonic 1 leftover)
 		bmi.s	loc_46C2			; If so, branch (Sonic 1 leftover)
 		moveq	#signextendB(cmd_FadeOut),d0		; If a demo
-		bsr.w	Play_SFX
+		bsr.w	Play_Music
 
 loc_46C2:
 		clr.w	(Kos_decomp_queue_count).w
@@ -6107,9 +5983,15 @@ loc_4C78:
 		add.w	d0,(_unkFF7C).w
 		bcc.s	loc_4CCC
 		bsr.w	Pause_Game
+
+	if OptimiseStopZ80=2
 		move.w	#$100,(Z80_bus_request).l	; stop the Z80
+	endif
+
 		bsr.w	Poll_Controllers
+		startZ802
 		startZ80
+
 		move.w	#0,(DMA_queue).w
 		move.l	#DMA_queue,(DMA_queue_slot).w
 		lea	(Sprite_table_input).w,a5
@@ -8183,26 +8065,36 @@ loc_66C0:
 loc_66D0:
 		move.w	d2,(a1)
 		cmpi.b	#2,(Options_menu_box).w
-		bne.s	locret_66FE
-		andi.w	#button_B_mask|button_C_mask,d0
-		beq.s	locret_66FE
+		bne.s	.return
+		btst	#button_C,d0
+		beq.s	.sfx
 		move.w	(Sound_test_sound).w,d0
 		bsr.w	Play_Music
+
+.cheats
 		lea	(S2LevelSelectCodeDat).l,a0
 		lea	(S2ContinueCodeDat).l,a2
 		lea	(Level_select_flag).w,a1
 		moveq	#0,d2
 		bsr.w	CheckCheats
 
-locret_66FE:
+.return
 		rts
+; ---------------------------------------------------------------------------
+
+.sfx
+		btst	#button_B,d0
+		beq.s	.return
+		move.w	(Sound_test_sound).w,d0
+		jsr	(Play_SFX).l
+		bra.s	.cheats
 ; End of function OptionScreen_Controls
 
 ; ---------------------------------------------------------------------------
 OptionScreen_Choices:
 		dc.l (3-1)<<24|(Player_option&$FFFFFF)
 		dc.l (2-1)<<24|(Two_player_items&$FFFFFF)
-		dc.l ($CA-1)<<24|(Sound_test_sound&$FFFFFF)
+		dc.l ($100-1)<<24|(Sound_test_sound&$FFFFFF)
 
 ; =============== S U B R O U T I N E =======================================
 
@@ -8601,7 +8493,7 @@ LevelSelect_StartZone:
 		move.l	#5000,(Next_extra_life_score).w
 		move.l	#5000,(Next_extra_life_score_P2).w
 		moveq	#signextendB(cmd_FadeOut),d0
-		jsr	(Play_SFX).l
+		jsr	(Play_Music).l
 		moveq	#0,d0
 		move.w	d0,(Competition_settings).w
 		move.w	d0,(Competition_mode).w
@@ -8680,6 +8572,8 @@ loc_6BCA:
 		beq.s	loc_6BF4
 		move.w	(Sound_test_sound).w,d0
 		jsr	(Play_Music).l
+
+.cheats
 		lea	(DebugCodeDat).l,a0
 		lea	(AllEmeraldsCodeDat).l,a2
 		lea	(Debug_cheat_flag).w,a1
@@ -8690,8 +8584,10 @@ loc_6BCA:
 loc_6BF4:
 		btst	#button_B,d1
 		beq.s	locret_6C02
-		moveq	#signextendB(cmd_MutePSG),d0
-		jsr	(Play_Music).l
+		move.w	(Sound_test_sound).w,d0
+		jsr	(Play_SFX).l
+		bra.s	loc_6BCA.cheats
+; ---------------------------------------------------------------------------
 
 locret_6C02:
 		rts
@@ -10401,7 +10297,7 @@ loc_86C6:
 		subq.w	#1,(Special_stage_rings_left).w
 		bne.s	loc_86D4
 		moveq	#signextendB(sfx_Perfect),d0
-		jsr	(Play_Music).l
+		jsr	(Play_SFX).l
 
 loc_86D4:
 		addi.w	#1,(Special_stage_ring_count).w
@@ -10412,7 +10308,7 @@ loc_86D4:
 		bne.s	loc_86FE
 		addq.b	#1,(Continue_count).w
 		move.w	#signextendB(sfx_Continue),d0
-		jmp	(Play_Music).l
+		jmp	(Play_SFX).l
 ; ---------------------------------------------------------------------------
 
 loc_86FE:
@@ -10750,7 +10646,7 @@ sub_89E2:
 		cmpi.w	#2,(Special_stage_clear_timer).w
 		bne.s	loc_8A0C
 		moveq	#signextendB(sfx_AllSpheres),d0
-		jsr	(Play_Music).l
+		jsr	(Play_SFX).l
 
 loc_8A0C:
 		cmpi.w	#$40,(Special_stage_clear_timer).w
@@ -13754,7 +13650,12 @@ loc_B5F8:
 
 
 SRAM_Load:
-		move.b	#1,(SRAM_access_flag).l
+
+		; Blad: from S3K (SRAM access)
+		; Sonic 3 never disables SRAM access so the game will crash because the ROM is now over 2MB
+		clr.w	(SRAM_mask_interrupts_flag).w	; No interrupt shenanigans needed
+
+		; next
 		lea	(SRAM_competition).l,a0
 		lea	(SRAM_competition_backup).l,a1
 		lea	(Competition_saved_data).w,a2
@@ -13769,7 +13670,7 @@ SRAM_Load:
 loc_B66A:
 		move.w	(a0)+,(a1)+		; Reset the general save data to the default
 		dbf	d0,loc_B66A
-		jsr	Write_SaveGeneral(pc)	; Write default data back to SRAM
+		jsr	Write_SaveGeneral2(pc)	; Write default data back to SRAM
 
 loc_B674:
 		lea	(SRAM_S3game).l,a0
@@ -13833,6 +13734,16 @@ Get_From_SRAM:
 
 
 Read_SRAM:
+
+		; from S3K (SRAM access)
+		tst.w	(SRAM_mask_interrupts_flag).w
+		beq.s	.skip
+		move	#$2700,sr		; Disable interrupts if EF56 is set
+
+.skip
+		move.b	#1,(SRAM_access_flag).l	; Access SRAM
+
+		; next
 		movea.l	a2,a6
 		move.w	d0,d6
 
@@ -13841,6 +13752,16 @@ loc_B74A:
 		move.w	d3,(a2)+		; Read data from SRAM
 		addq.w	#4,a0
 		dbf	d0,loc_B74A
+
+		; from S3K (SRAM access)
+		move.b	#0,(SRAM_access_flag).l	; No longer access SRAM
+		tst.w	(SRAM_mask_interrupts_flag).w
+		beq.s	.skip
+		move	#$2300,sr		; Restore interrupts if EF56 is set
+
+.skip
+
+		; next
 		subq.w	#1,d6
 		bsr.s	Create_SRAMChecksum	; Get the checksum of the given data
 		cmp.w	(a6),d7		; Compare the result
@@ -13880,6 +13801,16 @@ Write_SRAM:
 		subq.w	#1,d6
 		bsr.s	Create_SRAMChecksum
 		move.w	d7,(a6)
+
+		; from S3K (SRAM access)
+		tst.w	(SRAM_mask_interrupts_flag).w
+		beq.s	.skip
+		move	#$2700,sr		; If EF56 is set, disable interrupts while saving is occuring
+
+.skip
+		move.b	#1,(SRAM_access_flag).l	; Send I/O signal to SRAM, mapping it to $200001
+
+		; next
 		movea.l	a2,a3
 		move.w	d0,d1
 
@@ -13894,6 +13825,16 @@ loc_B792:
 		movep.w	d2,0(a1)	; Copy data to backup SRAM
 		addq.w	#4,a1
 		dbf	d1,loc_B792
+
+		; from S3K (SRAM access)
+		move.b	#0,(SRAM_access_flag).l	; Stop SRAM access
+		tst.w	(SRAM_mask_interrupts_flag).w
+		beq.s	.skip
+		move	#$2300,sr		; Restore interrupts if EF56 was set
+
+.skip
+
+		; next
 		rts
 ; End of function Write_SRAM
 
@@ -13902,6 +13843,13 @@ loc_B792:
 
 
 Write_SaveGeneral:
+		st	(SRAM_mask_interrupts_flag).w
+; End of function Write_SaveGeneral
+
+; =============== S U B R O U T I N E =======================================
+
+
+Write_SaveGeneral2:
 		move.l	a0,-(sp)
 		move.w	d7,-(sp)
 		lea	(SRAM_competition).l,a0		; Save general SRAM
@@ -13925,7 +13873,7 @@ Write_SaveGame:
 		lea	(SRAM_S3game_backup).l,a1		; Save game backup SRAM
 		lea	(Saved_data).w,a2	; Save game RAM
 		moveq	#bytesToWcnt(SRAM_S3game_size),d0
-		bsr.s	Write_SRAM
+		bsr.w	Write_SRAM
 		move.w	(sp)+,d7
 		movea.l	(sp)+,a0
 		rts
@@ -14762,6 +14710,7 @@ loc_C40A:
 		clr.l	(Collected_special_ring_array).w
 		move.l	a1,(Save_pointer).w
 		jsr	(Set_Lives_and_Continues).l
+		st	(SRAM_mask_interrupts_flag).w
 		jsr	Write_SaveGame(pc)
 		jmp	(Draw_Sprite).l
 ; ---------------------------------------------------------------------------
@@ -14994,6 +14943,7 @@ loc_C6AC:
 		clr.l	(a1)
 		clr.l	4(a1)
 		bset	#7,(a1)
+		st	(SRAM_mask_interrupts_flag).w
 		jsr	Write_SaveGame(pc)
 
 loc_C6DA:
@@ -23703,7 +23653,7 @@ loc_14676:
 		move.w	#$C,Acceleration_P2-Max_speed_P2(a4)
 		move.w	#$80,Deceleration_P2-Max_speed_P2(a4)
 		bclr	#Status_SpeedShoes,status_secondary(a0)
-		moveq	#0,d0
+		moveq	#0,d0		; Slow down tempo
 		jmp	(Change_Music_Tempo).l
 ; ---------------------------------------------------------------------------
 
@@ -33524,7 +33474,7 @@ loc_1B6F8:
 
 loc_1B714:
 		moveq	#signextendB(sfx_RingRight),d0
-		jmp	(Play_Music).l
+		jmp	(Play_SFX).l
 ; ---------------------------------------------------------------------------
 
 loc_1B71C:
@@ -33553,7 +33503,7 @@ loc_1B758:
 		move.w	#$80,(Deceleration_P2).w
 
 loc_1B76A:
-		moveq	#8,d0
+		moveq	#8,d0		; Speed up tempo
 		jmp	(Change_Music_Tempo).l
 ; ---------------------------------------------------------------------------
 
@@ -33563,18 +33513,20 @@ Monitor_Give_FireShield:
 		bset	#Status_Shield,status_secondary(a1)
 		bset	#Status_FireShield,status_secondary(a1)
 		moveq	#signextendB(sfx_FireShield),d0
-		jsr	(Play_Music).l
-		tst.b	parent+1(a0)
-		bne.s	loc_1B7A2
+		jsr	(Play_SFX).l
+
+;		tst.b	parent+1(a0)
+;		bne.s	loc_1B7A2
+
 		move.l	#Obj_FireShield,(Shield).w
 		move.w	a1,(Shield+parent).w
 		rts
 ; ---------------------------------------------------------------------------
 
-loc_1B7A2:
-		move.l	#Obj_FireShield,(Shield_P2).w
-		move.w	a1,(Shield_P2+parent).w
-		rts
+;loc_1B7A2:
+;		move.l	#Obj_FireShield,(Shield_P2).w
+;		move.w	a1,(Shield_P2+parent).w
+;		rts
 ; ---------------------------------------------------------------------------
 
 Monitor_Give_LightningShield:
@@ -33583,18 +33535,20 @@ Monitor_Give_LightningShield:
 		bset	#Status_Shield,status_secondary(a1)
 		bset	#Status_LtngShield,status_secondary(a1)
 		moveq	#signextendB(sfx_LightningShield),d0
-		jsr	(Play_Music).l
-		tst.b	parent+1(a0)
-		bne.s	loc_1B7E0
+		jsr	(Play_SFX).l
+
+;		tst.b	parent+1(a0)
+;		bne.s	loc_1B7E0
+
 		move.l	#Obj_LightningShield,(Shield).w
 		move.w	a1,(Shield+parent).w
 		rts
 ; ---------------------------------------------------------------------------
 
-loc_1B7E0:
-		move.l	#Obj_LightningShield,(Shield_P2).w
-		move.w	a1,(Shield_P2+parent).w
-		rts
+;loc_1B7E0:
+;		move.l	#Obj_LightningShield,(Shield_P2).w
+;		move.w	a1,(Shield_P2+parent).w
+;		rts
 ; ---------------------------------------------------------------------------
 
 Monitor_Give_BubbleShield:
@@ -33603,18 +33557,20 @@ Monitor_Give_BubbleShield:
 		bset	#Status_Shield,status_secondary(a1)
 		bset	#Status_BublShield,status_secondary(a1)
 		moveq	#signextendB(sfx_BubbleShield),d0
-		jsr	(Play_Music).l
-		tst.b	parent+1(a0)
-		bne.s	loc_1B81E
+		jsr	(Play_SFX).l
+
+;		tst.b	parent+1(a0)
+;		bne.s	loc_1B81E
+
 		move.l	#Obj_BubbleShield,(Shield).w
 		move.w	a1,(Shield+parent).w
 		rts
 ; ---------------------------------------------------------------------------
 
-loc_1B81E:
-		move.l	#Obj_BubbleShield,(Shield_P2).w
-		move.w	a1,(Shield_P2+parent).w
-		rts
+;loc_1B81E:
+;		move.l	#Obj_BubbleShield,(Shield_P2).w
+;		move.w	a1,(Shield_P2+parent).w
+;		rts
 ; ---------------------------------------------------------------------------
 
 Monitor_Give_Invincibility:
@@ -33631,19 +33587,21 @@ Monitor_Give_Invincibility:
 		jsr	(Play_Music).l
 
 loc_1B856:
-		tst.b	parent+1(a0)
-		bne.s	loc_1B86A
+
+;		tst.b	parent+1(a0)
+;		bne.s	loc_1B86A
+
 		move.l	#Obj_Invincibility,(Invincibility_stars).w
 		move.w	a1,(Invincibility_stars+parent).w
-		rts
-; ---------------------------------------------------------------------------
-
-loc_1B86A:
-		move.l	#Obj_Invincibility,(Invincibility_stars_P2).w
-		move.w	a1,(Invincibility_stars_P2+parent).w
 
 locret_1B876:
 		rts
+; ---------------------------------------------------------------------------
+
+;loc_1B86A:
+;		move.l	#Obj_Invincibility,(Invincibility_stars_P2).w
+;		move.w	a1,(Invincibility_stars_P2+parent).w
+;		rts
 ; ---------------------------------------------------------------------------
 
 Monitor_Give_SuperSonic:
@@ -53541,6 +53499,7 @@ locret_2CF8E:
 loc_2CF90:
 		moveq	#signextendB(sfx_Register),d0	; Play the cash register sound
 		jsr	(Play_SFX).l
+		st	(SRAM_mask_interrupts_flag).w
 		jsr	(SaveGame).l
 		move.w	#90,$2E(a0)	; Set wait amount
 		addq.b	#2,routine(a0)
@@ -53879,6 +53838,7 @@ SpecialStage_Results:
 		clearRAM	Object_RAM,(Kos_decomp_buffer-Object_RAM)
 		clr.w	(DMA_queue).w
 		move.l	#DMA_queue,(DMA_queue_slot).w
+		clr.w	(SRAM_mask_interrupts_flag).w
 		jsr	(SaveGame_SpecialStage).l
 		clr.w	(Competition_mode).w
 		clr.w	(Plane_buffer).w
@@ -55051,7 +55011,7 @@ loc_2E958:
 		bmi.s	loc_2E990
 		clr.b	(Palette_cycle_counters+$00).w
 		move.w	#signextendB(cmd_MutePSG),d0
-		jsr	(Play_SFX).l
+		jsr	(Play_Music).l
 		move.w	#signextendB(cmd_StopSFX),d0
 		jsr	(Play_SFX).l
 		move.w	#150,$30(a0)
@@ -55360,7 +55320,7 @@ loc_2EDBA:
 		move.w	#signextendB(cmd_StopSFX),d0
 		jsr	(Play_SFX).l
 		move.w	#signextendB(cmd_MutePSG),d0
-		jsr	(Play_SFX).l		; this will actually never play... Why is any of this here?
+		jsr	(Play_Music).l		; this will actually never play... Why is any of this here?
 		move.w	#signextendB(cmd_StopSFX),d0
 		jsr	(Play_SFX).l
 		move.b	#0,(Palette_cycle_counters+$00).w
@@ -78259,8 +78219,8 @@ loc_43322:
 loc_4332E:
 		addq.b	#2,routine(a0)
 		st	(_unkF660).w
-		move.b	#cmd_S2SEGA,d0
-		jsr	(Play_SFX).l
+		moveq	#signextendB(cmd_SegaSound),d0	; mus_S2SEGA
+		jsr	(Play_Music).l
 
 locret_43340:
 		rts
@@ -79241,7 +79201,7 @@ loc_43DA2:
 		moveq	#Status_FireShield,d0
 		bsr.w	sub_43E20
 		moveq	#signextendB(sfx_FireShield),d0
-		jmp	(Play_Music).l
+		jmp	(Play_SFX).l
 ; ---------------------------------------------------------------------------
 
 loc_43DCC:
@@ -79253,7 +79213,7 @@ loc_43DCC:
 		moveq	#Status_BublShield,d0
 		bsr.w	sub_43E20
 		moveq	#signextendB(sfx_BubbleShield),d0
-		jmp	(Play_Music).l
+		jmp	(Play_SFX).l
 ; ---------------------------------------------------------------------------
 
 loc_43DF6:
@@ -79265,7 +79225,7 @@ loc_43DF6:
 		moveq	#Status_LtngShield,d0
 		bsr.w	sub_43E20
 		moveq	#signextendB(sfx_LightningShield),d0
-		jmp	(Play_Music).l
+		jmp	(Play_SFX).l
 
 ; =============== S U B R O U T I N E =======================================
 
@@ -100359,6 +100319,7 @@ loc_51D78:
 		jsr	Restore_PlayerControl(pc)
 
 loc_51D82:
+		st	(SRAM_mask_interrupts_flag).w
 		jmp	(SaveGame).l
 ; End of function sub_51CDE
 
@@ -104848,7 +104809,7 @@ loc_544A8:
 
 loc_544C4:
 		moveq	#signextendB(sfx_RingRight),d0
-		jmp	(Play_Music).l
+		jmp	(Play_SFX).l
 ; ---------------------------------------------------------------------------
 
 loc_544CC:
@@ -118041,354 +118002,6 @@ DemoDat_MGZ:
 		binclude "Levels/MGZ/Demodata/1.bin"
 		even
 
-; ===========================================================================
-; Music Banks
-; ===========================================================================
-	cnop -Size_of_Snd_Bank1, $8000	; aligned to end of bank
-
-; ---------------------------------------------------------------------------
-; Music Bank 1
-; ---------------------------------------------------------------------------
-Snd_Bank1_Start:
-Snd_Minib:	include "Sound/Music/Miniboss (Sonic 3).asm"
-Snd_FinalBoss:	include "Sound/Music/Final Boss.asm"
-Snd_Bank1_End
-
-	if Snd_Bank1_End - Snd_Bank1_Start > $8000
-		fatal "Snd_Bank1_Start must fit within $8000 bytes, but was $\{Snd_Bank1_End-Snd_Bank1_Start }. Try moving something to the other bank."
-	endif
-	if Snd_Bank1_End - Snd_Bank1_Start > Size_of_Snd_Bank1
-		fatal "Size_of_Snd_Bank1 = $\{Size_of_Snd_Bank1}, but you have $\{Snd_Bank1_End-Snd_Bank1_Start} bytes of music."
-	endif
-
-; ---------------------------------------------------------------------------
-; Music Bank 2
-; ---------------------------------------------------------------------------
-Snd_Bank2_Start:	startBank
-Snd_AIZ1:	include "Sound/Music/AIZ1.asm"
-Snd_AIZ2:	include "Sound/Music/AIZ2.asm"
-Snd_HCZ1:	include "Sound/Music/HCZ1.asm"
-Snd_HCZ2:	include "Sound/Music/HCZ2.asm"
-Snd_MGZ1:	include "Sound/Music/MGZ1.asm"
-Snd_MGZ2:	include "Sound/Music/MGZ2.asm"
-Snd_CNZ2:	include "Sound/Music/CNZ2.asm"
-Snd_CNZ1:	include "Sound/Music/CNZ1.asm"
-Snd_FBZ1:	include "Sound/Music/FBZ1 (Sonic 3).asm"
-Snd_FBZ2:	include "Sound/Music/FBZ2.asm"
-Snd_DDZ:	include "Sound/Music/DDZ.asm"
-
-	finishBank
-
-; ---------------------------------------------------------------------------
-; Music Bank 3
-; ---------------------------------------------------------------------------
-Snd_Bank3_Start:	startBank
-Snd_ICZ2:	include "Sound/Music/ICZ2.asm"
-Snd_ICZ1:	include "Sound/Music/ICZ1.asm"
-Snd_LBZ2:	include "Sound/Music/LBZ2.asm"
-Snd_LBZ1:	include "Sound/Music/LBZ1.asm"
-Snd_MHZ1:	include "Sound/Music/MHZ1.asm"
-Snd_MHZ2:	include "Sound/Music/MHZ2.asm"
-Snd_SOZ1:	include "Sound/Music/SOZ1.asm"
-Snd_SOZ2:	include "Sound/Music/SOZ2.asm"
-Snd_LRZ1:	include "Sound/Music/LRZ1.asm"
-Snd_LRZ2:	include "Sound/Music/LRZ2.asm"
-Snd_SSZ:	include "Sound/Music/SSZ (Sonic 3).asm"
-Snd_DEZ1:	include "Sound/Music/DEZ1.asm"
-Snd_DEZ2:	include "Sound/Music/DEZ2.asm"
-Snd_Minib_SK:	include "Sound/Music/Miniboss (Sonic & Knuckles).asm"
-Snd_Boss:	include "Sound/Music/Zone Boss.asm"
-Snd_PachBonus:	include "Sound/Music/Pachinko.asm"
-Snd_SpecialS:	include "Sound/Music/Special Stage.asm"
-Snd_Results:	include "Sound/Music/Level Outro.asm"
-Snd_Menu:	include "Sound/Music/Menu (Sonic 3).asm"
-
-	finishBank
-
-; ---------------------------------------------------------------------------
-; Music Bank 4
-; ---------------------------------------------------------------------------
-Snd_Bank4_Start:	startBank
-Snd_SlotBonus:	include "Sound/Music/Slots.asm"
-Snd_GumBonus:	include "Sound/Music/Gum Ball Machine.asm"
-Snd_Knux:	include "Sound/Music/Knuckles (Sonic 3).asm"
-Snd_ALZ:	include "Sound/Music/Azure Lake.asm"
-Snd_BPZ:	include "Sound/Music/Balloon Park.asm"
-Snd_DPZ:	include "Sound/Music/Desert Palace.asm"
-Snd_CGZ:	include "Sound/Music/Chrome Gadget.asm"
-Snd_EMZ:	include "Sound/Music/Endless Mine.asm"
-Snd_Title:	include "Sound/Music/Title (Sonic 3).asm"
-Snd_S3Credits:	include "Sound/Music/Credits (Sonic 3).asm"
-Snd_GameOver:	include "Sound/Music/Game Over.asm"
-Snd_Continue:	include "Sound/Music/Continue (Sonic 3).asm"
-Snd_1UP:	include "Sound/Music/1UP (Sonic 3).asm"
-Snd_Emerald:	include "Sound/Music/Chaos Emerald.asm"
-Snd_Invic:	include "Sound/Music/Invincible (Sonic 3).asm"
-Snd_2PMenu:	include "Sound/Music/Competition Menu.asm"
-Snd_Drown:	include "Sound/Music/Countdown.asm"
-Snd_PresSega:	include "Sound/Music/Game Complete (Sonic 3).asm"
-
-	finishBank
-
-; ---------------------------------------------------------------------------
-; ===========================================================================
-; DAC Banks
-; ===========================================================================
-; DAC Bank 1
-; ---------------------------------------------------------------------------
-DacBank1:	startDACBank
-
-DAC_86_Data:			include "Sound/DAC/generated/86.inc"
-DAC_81_Data:			include "Sound/DAC/generated/81.inc"
-DAC_82_83_84_85_Data:		include "Sound/DAC/generated/82-85.inc"
-DAC_94_95_96_97_Data:		include "Sound/DAC/generated/94-97.inc"
-DAC_90_91_92_93_Data:		include "Sound/DAC/generated/90-93.inc"
-DAC_88_Data:			include "Sound/DAC/generated/88.inc"
-DAC_8A_8B_Data:			include "Sound/DAC/generated/8A-8B.inc"
-DAC_8C_Data:			include "Sound/DAC/generated/8C.inc"
-DAC_8D_8E_Data:			include "Sound/DAC/generated/8D-8E.inc"
-DAC_87_Data:			include "Sound/DAC/generated/87.inc"
-DAC_8F_Data:			include "Sound/DAC/generated/8F.inc"
-DAC_89_Data:			include "Sound/DAC/generated/89.inc"
-DAC_98_99_9A_Data:		include "Sound/DAC/generated/98-9A.inc"
-
-	finishBank
-
-		align $1000
-
-		include "Sound/Z80 Sound Driver.asm"
-
-; ---------------------------------------------------------------------------
-; Dac Bank 2
-; ---------------------------------------------------------------------------
-DacBank2:	startDACBank
-
-DAC_9B_Data:			include "Sound/DAC/generated/9B.inc"
-DAC_9C_Data:			include "Sound/DAC/generated/9C.inc"
-DAC_9D_Data:			include "Sound/DAC/generated/9D.inc"
-DAC_9E_Data:			include "Sound/DAC/generated/9E.inc"
-DAC_9F_Data:			include "Sound/DAC/generated/9F.inc"
-DAC_A0_Data:			include "Sound/DAC/generated/A0.inc"
-DAC_A1_Data:			include "Sound/DAC/generated/A1.inc"
-DAC_A2_Data:			include "Sound/DAC/generated/A2.inc"
-DAC_A3_Data:			include "Sound/DAC/generated/A3.inc"
-DAC_A4_Data:			include "Sound/DAC/generated/A4.inc"
-DAC_A5_Data:			include "Sound/DAC/generated/A5.inc"
-DAC_A6_Data:			include "Sound/DAC/generated/A6.inc"
-DAC_A7_Data:			include "Sound/DAC/generated/A7.inc"
-DAC_A8_Data:			include "Sound/DAC/generated/A8.inc"
-DAC_A9_Data:			include "Sound/DAC/generated/A9.inc"
-DAC_AA_Data:			include "Sound/DAC/generated/AA.inc"
-
-	finishBank
-
-; ---------------------------------------------------------------------------
-; Dac Bank 3
-; ---------------------------------------------------------------------------
-DacBank3:	startDACBank
-
-DAC_AB_Data:			include "Sound/DAC/generated/AB.inc"
-DAC_AC_Data:			include "Sound/DAC/generated/AC.inc"
-DAC_AD_AE_Data:			include "Sound/DAC/generated/AD-AE.inc"
-DAC_AF_B0_Data:			include "Sound/DAC/generated/AF-B0.inc"
-DAC_Unused_Data:		include "Sound/DAC/generated/Unused.inc"
-DAC_B1_Data:			include "Sound/DAC/generated/B1.inc"
-DAC_B2_B3_Data:			include "Sound/DAC/generated/B2-B3 (Sonic 3).inc"
-DAC_B4_C1_C2_C3_C4_Data:	include "Sound/DAC/generated/B4C1-C4.inc"
-DAC_B5_Data:			include "Sound/DAC/generated/B5.inc"
-DAC_B6_Data:			include "Sound/DAC/generated/B6.inc"
-DAC_B7_Data:			include "Sound/DAC/generated/B7.inc"
-DAC_B8_B9_Data:			include "Sound/DAC/generated/B8-B9.inc"
-DAC_BA_Data:			include "Sound/DAC/generated/BA.inc"
-DAC_BB_Data:			include "Sound/DAC/generated/BB.inc"
-DAC_BC_Data:			include "Sound/DAC/generated/BC.inc"
-DAC_BD_Data:			include "Sound/DAC/generated/BD.inc"
-DAC_BE_Data:			include "Sound/DAC/generated/BE.inc"
-DAC_BF_Data:			include "Sound/DAC/generated/BF.inc"
-DAC_C0_Data:			include "Sound/DAC/generated/C0.inc"
-
-	finishBank
-
-; ===========================================================================
-; Sound Bank
-; ===========================================================================
-SndBank:			startBank
-
-SEGA_PCM:	include "Sound/PCM/generated/Sega.inc"
-
-		align 2
-Sound_33:	include "Sound/SFX/33 - Ring (Right).asm"
-Sound_34:	include "Sound/SFX/34 - Ring (Left).asm"
-Sound_35:	include "Sound/SFX/35 - Death.asm"
-Sound_36:	include "Sound/SFX/36 - Skid.asm"
-Sound_37:	include "Sound/SFX/37 - Spike Hit.asm"
-Sound_38:	include "Sound/SFX/38 - Bubble.asm"
-Sound_39:	include "Sound/SFX/39 - Splash.asm"
-Sound_3A:	include "Sound/SFX/3A - Shield.asm"
-Sound_3B:	include "Sound/SFX/3B - Drown.asm"
-Sound_3C:	include "Sound/SFX/3C - Roll.asm"
-Sound_3D:	include "Sound/SFX/3D - Break.asm"
-Sound_3E:	include "Sound/SFX/3E - Fire Shield.asm"
-Sound_3F:	include "Sound/SFX/3F - Bubble Shield.asm"
-Sound_40:	include "Sound/SFX/40 - Unknown Shield.asm"
-Sound_41:	include "Sound/SFX/41 - Lightning Shield.asm"
-Sound_42:	include "Sound/SFX/42 - Insta Shield Attack.asm"
-Sound_43:	include "Sound/SFX/43 - Fire Shield Attack.asm"
-Sound_44:	include "Sound/SFX/44 - Bubble Shield Attack.asm"
-Sound_45:	include "Sound/SFX/45 - Lightning Shield Attack.asm"
-Sound_46:	include "Sound/SFX/46 - Whistle.asm"
-Sound_47:	include "Sound/SFX/47 - Sand Wall Rise.asm"
-Sound_48:	include "Sound/SFX/48 - Blast.asm"
-Sound_49:	include "Sound/SFX/49 - Thump.asm"
-Sound_4A:	include "Sound/SFX/4A - Grab.asm"
-Sound_4B:	include "Sound/SFX/4B - Waterfall Splash.asm"
-Sound_4C:	include "Sound/SFX/4C - Glide Land.asm"
-Sound_4D:	include "Sound/SFX/4D - Projectile.asm"
-Sound_4E:	include "Sound/SFX/4E - Missile Explode.asm"
-Sound_4F:	include "Sound/SFX/4F - Flamethrower (Quiet).asm"
-Sound_50:	include "Sound/SFX/50 - Boss Activate.asm"
-Sound_51:	include "Sound/SFX/51 - Missile Throw.asm"
-Sound_52:	include "Sound/SFX/52 - Spike Move.asm"
-Sound_53:	include "Sound/SFX/53 - Charging.asm"
-Sound_54:	include "Sound/SFX/54 - Boss Laser.asm"
-Sound_55:	include "Sound/SFX/55 - Block Conveyor.asm"
-Sound_56:	include "Sound/SFX/56 - Flip Bridge.asm"
-Sound_57:	include "Sound/SFX/57 - Geyser.asm"
-Sound_58:	include "Sound/SFX/58 - Fan Latch.asm"
-Sound_59:	include "Sound/SFX/59 - Collapse.asm"
-Sound_5A:	include "Sound/SFX/5A - Unknown Charge.asm"
-Sound_5B:	include "Sound/SFX/5B - Switch.asm"
-Sound_5C:	include "Sound/SFX/5C - Mecha Spark.asm"
-Sound_5D:	include "Sound/SFX/5D - Floor Thump.asm"
-Sound_5E:	include "Sound/SFX/5E - Laser.asm"
-Sound_5F:	include "Sound/SFX/5F - Crash.asm"
-Sound_60:	include "Sound/SFX/60 - Boss Zoom.asm"
-Sound_61:	include "Sound/SFX/61 - Boss Hit Floor.asm"
-Sound_62:	include "Sound/SFX/62 - Jump.asm"
-Sound_63:	include "Sound/SFX/63 - Star Post.asm"
-Sound_64:	include "Sound/SFX/64 - Pulley Grab.asm"
-Sound_65:	include "Sound/SFX/65 - Blue Sphere.asm"
-Sound_66:	include "Sound/SFX/66 - All Spheres Collected.asm"
-Sound_67:	include "Sound/SFX/67 - Level Projectile.asm"
-Sound_68:	include "Sound/SFX/68 - Perfect.asm"
-Sound_69:	include "Sound/SFX/69 - Push Block.asm"
-Sound_6A:	include "Sound/SFX/6A - Goal.asm"
-Sound_6B:	include "Sound/SFX/6B - Action Block.asm"
-Sound_6C:	include "Sound/SFX/6C - Splash 2.asm"
-Sound_6D:	include "Sound/SFX/6D - Unknown Shift.asm"
-Sound_6E:	include "Sound/SFX/6E - Boss Hit.asm"
-Sound_6F:	include "Sound/SFX/6F - Rumble 2.asm"
-Sound_70:	include "Sound/SFX/70 - Lava Ball.asm"
-Sound_71:	include "Sound/SFX/71 - Shield 2.asm"
-Sound_72:	include "Sound/SFX/72 - Hoverpad.asm"
-Sound_73:	include "Sound/SFX/73 - Transporter.asm"
-Sound_74:	include "Sound/SFX/74 - Tunnel Booster.asm"
-Sound_75:	include "Sound/SFX/75 - Balloon Platform.asm"
-Sound_76:	include "Sound/SFX/76 - Trap Door.asm"
-Sound_77:	include "Sound/SFX/77 - Balloon.asm"
-Sound_78:	include "Sound/SFX/78 - Gravity Machine.asm"
-Sound_79:	include "Sound/SFX/79 - Lightning.asm"
-Sound_7A:	include "Sound/SFX/7A - Boss Magma.asm"
-Sound_7B:	include "Sound/SFX/7B - Small Bumpers.asm"
-Sound_7C:	include "Sound/SFX/7C - Chain Tension.asm"
-Sound_7D:	include "Sound/SFX/7D - Unknown Pump.asm"
-Sound_7E:	include "Sound/SFX/7E - Ground Slide.asm"
-Sound_7F:	include "Sound/SFX/7F - Frost Puff.asm"
-Sound_80:	include "Sound/SFX/80 - Ice Spikes.asm"
-Sound_81:	include "Sound/SFX/81 - Tube Launcher.asm"
-Sound_82:	include "Sound/SFX/82 - Sand Splash.asm"
-Sound_83:	include "Sound/SFX/83 - Bridge Collapse.asm"
-Sound_84:	include "Sound/SFX/84 - Unknown Power-Up.asm"
-Sound_85:	include "Sound/SFX/85 - Unknown Power-Down.asm"
-Sound_86:	include "Sound/SFX/86 - Alarm.asm"
-Sound_87:	include "Sound/SFX/87 - Mushroom Bounce.asm"
-Sound_88:	include "Sound/SFX/88 - Pulley Move.asm"
-Sound_89:	include "Sound/SFX/89 - Weather Machine.asm"
-Sound_8A:	include "Sound/SFX/8A - Bouncy.asm"
-Sound_8B:	include "Sound/SFX/8B - Chop Tree.asm"
-Sound_8C:	include "Sound/SFX/8C - Chop Stuck.asm"
-Sound_8D:	include "Sound/SFX/8D - Unknown Flutter.asm"
-Sound_8E:	include "Sound/SFX/8E - Unknown Revving.asm"
-Sound_8F:	include "Sound/SFX/8F - Door Open.asm"
-Sound_90:	include "Sound/SFX/90 - Door Move.asm"
-Sound_91:	include "Sound/SFX/91 - Door Close.asm"
-Sound_92:	include "Sound/SFX/92 - Ghost Appear.asm"
-Sound_93:	include "Sound/SFX/93 - Boss Recovery.asm"
-Sound_94:	include "Sound/SFX/94 - Chain Tick.asm"
-Sound_95:	include "Sound/SFX/95 - Boss Hand.asm"
-Sound_96:	include "Sound/SFX/96 - Mecha Land.asm"
-Sound_97:	include "Sound/SFX/97 - Enemy Breath.asm"
-Sound_98:	include "Sound/SFX/98 - Boss Projectile.asm"
-Sound_99:	include "Sound/SFX/99 - Unknown Plink.asm"
-Sound_9A:	include "Sound/SFX/9A - Spring Latch.asm"
-Sound_9B:	include "Sound/SFX/9B - Thump Boss (Sonic 3).asm"
-Sound_9C:	include "Sound/SFX/9C - Super Emerald.asm"
-Sound_9D:	include "Sound/SFX/9D - Targeting.asm"
-Sound_9E:	include "Sound/SFX/9E - Clank.asm"
-Sound_9F:	include "Sound/SFX/9F - Super Transform.asm"
-Sound_A0:	include "Sound/SFX/A0 - Missile Shoot.asm"
-Sound_A1:	include "Sound/SFX/A1 - Unknown Ominous.asm"
-Sound_A2:	include "Sound/SFX/A2 - Floor Launcher.asm"
-Sound_A3:	include "Sound/SFX/A3 - Gravity Lift.asm"
-Sound_A4:	include "Sound/SFX/A4 - Mecha Transform.asm"
-Sound_A5:	include "Sound/SFX/A5 - Unknown Rise.asm"
-Sound_A6:	include "Sound/SFX/A6 - Launch Grab.asm"
-Sound_A7:	include "Sound/SFX/A7 - Launch Ready.asm"
-Sound_A8:	include "Sound/SFX/A8 - Energy Zap.asm"
-Sound_A9:	include "Sound/SFX/A9 - Air Ding.asm"
-Sound_AA:	include "Sound/SFX/AA - Bumper.asm"
-Sound_AB:	include "Sound/SFX/AB - Spin Dash.asm"
-Sound_AC:	include "Sound/SFX/AC - Continue.asm"
-Sound_AD:	include "Sound/SFX/AD - Launch Go (Sonic 3).asm"
-Sound_AE:	include "Sound/SFX/AE - Flipper.asm"
-Sound_AF:	include "Sound/SFX/AF - Enter Special Stage.asm"
-Sound_B0:	include "Sound/SFX/B0 - Register.asm"
-Sound_B1:	include "Sound/SFX/B1 - Spring.asm"
-Sound_B2:	include "Sound/SFX/B2 - Error.asm"
-Sound_B3:	include "Sound/SFX/B3 - Big Ring.asm"
-Sound_B4:	include "Sound/SFX/B4 - Explode.asm"
-Sound_B5:	include "Sound/SFX/B5 - Diamonds.asm"
-Sound_B6:	include "Sound/SFX/B6 - Dash.asm"
-Sound_B7:	include "Sound/SFX/B7 - Slot Machine.asm"
-Sound_B8:	include "Sound/SFX/B8 - Signpost.asm"
-Sound_B9:	include "Sound/SFX/B9 - Ring Loss.asm"
-Sound_BA:	include "Sound/SFX/BA - Flying.asm"
-Sound_BB:	include "Sound/SFX/BB - Flying (Tired).asm"
-Sound_BC:	include "Sound/SFX/BC - Slide Skid (Loud).asm"
-Sound_BD:	include "Sound/SFX/BD - Large Ship.asm"
-Sound_BE:	include "Sound/SFX/BE - Robotnik Siren.asm"
-Sound_BF:	include "Sound/SFX/BF - Boss Rotate.asm"
-Sound_C0:	include "Sound/SFX/C0 - Fan (Big).asm"
-Sound_C1:	include "Sound/SFX/C1 - Fan (Small).asm"
-Sound_C2:	include "Sound/SFX/C2 - Flamethrower (Loud).asm"
-Sound_C3:	include "Sound/SFX/C3 - Gravity Tunnel.asm"
-Sound_C4:	include "Sound/SFX/C4 - Boss Panic.asm"
-Sound_C5:	include "Sound/SFX/C5 - Unknown Spin.asm"
-Sound_C6:	include "Sound/SFX/C6 - Wave Hover.asm"
-Sound_C7:	include "Sound/SFX/C7 - Cannon Turn.asm"
-Sound_C8:	include "Sound/SFX/C8 - Slide Skid (Quiet).asm"
-Sound_C9:	include "Sound/SFX/C9 - Spike Balls.asm"
-Sound_CA:	include "Sound/SFX/CA - Light Tunnel.asm"
-Sound_CB:	include "Sound/SFX/CB - Rumble.asm"
-Sound_CC:	include "Sound/SFX/CC - Big Rumble.asm"
-Sound_CD:	include "Sound/SFX/CD - Death Egg Rise (Loud).asm"
-Sound_CE:	include "Sound/SFX/CE - Wind (Quiet).asm"
-Sound_CF:	include "Sound/SFX/CF - Wind (Loud).asm"
-Sound_D0:	include "Sound/SFX/D0 - Rising.asm"
-Sound_D1:	include "Sound/SFX/D1 - Unknown Flutter 2.asm"
-Sound_D2:	include "Sound/SFX/D2 - Gumball Tab.asm"
-Sound_D3:	include "Sound/SFX/D3 - Death Egg Rise (Quiet).asm"
-Sound_D4:	include "Sound/SFX/D4 - Turbine Hum.asm"
-Sound_D5:	include "Sound/SFX/D5 - Lava Fall.asm"
-Sound_D6:	include "Sound/SFX/D6 - Unknown Zap.asm"
-Sound_D7:	include "Sound/SFX/D7 - Conveyor Platform.asm"
-Sound_D8:	include "Sound/SFX/D8 - Unknown Saw.asm"
-Sound_D9:	include "Sound/SFX/D9 - Magnetic Spike.asm"
-Sound_DA:	include "Sound/SFX/DA - Leaf Blower.asm"
-Sound_DB:	include "Sound/SFX/DB - Water Skid.asm"
-
-	finishBank
-
 		align $8000
 ArtUnc_Sonic:
 		binclude "General/Sprites/Sonic/Art/Sonic.unc"
@@ -119727,6 +119340,28 @@ Pachinko_128x128_Kos:
 Slots_16x16_Kos:
 ArtKosM_Slots:
 Slots_128x128_Kos:
-		org $200000
+
+; ---------------------------------------------------------------------------
+; Flamewing sound driver subroutines
+; ---------------------------------------------------------------------------
+
+		include "Sound/Flamedriver.asm"
+		even
+
+; --------------------------------------------------------------
+; Debugging modules
+; --------------------------------------------------------------
+
+		include "ErrorHandler/ErrorHandler.asm"
+
+; ---------------------------------------------------------------
+; WARNING!
+;	DO NOT put any data from now on! DO NOT use ROM padding!
+;	Symbol data should be appended here after ROM is compiled
+;	by ConvSym utility, otherwise debugger modules won't be able
+;	to resolve symbol names.
+; ---------------------------------------------------------------
+
+;		org $200000
 EndOfROM:
 		END
